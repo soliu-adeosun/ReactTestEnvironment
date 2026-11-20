@@ -1,104 +1,70 @@
 /**
  * CustomPeoplePicker – Standalone React + JavaScript
  * -------------------------------------------------
- * A self-contained people picker built on Select2.
- * No SharePoint, no global ERP objects, no legacy attributes.
+ * Works with Vite. No SharePoint / ERP dependencies.
  *
- * Peer dependencies:
- *   npm install react jquery select2
+ * Required packages (see package notes below):
+ *   npm install react jquery@3 select2
+ *
+ * In your entry file or App also import the CSS:
  *   import "select2/dist/css/select2.css";
- *
- * Data shape for each person:
- *   {
- *     id:    "jane.doe@company.com",   // unique value (usually email)
- *     name:  "Jane Doe",               // display name
- *     email: "jane.doe@company.com",   // optional, used for search
- *     image: "https://..."             // optional full image URL
- *   }
  */
 
 import React, { useEffect, useRef, useImperativeHandle, forwardRef } from "react";
 import $ from "jquery";
-import "select2";
+
+// ---- Make sure Select2 attaches to this jQuery instance (Vite/ESM safe) ----
+import select2 from "select2";
+if (typeof select2 === "function") {
+  // Some builds export a function that must be called with jQuery
+  select2($);
+}
+// Ensure global access for any internal Select2 checks
+if (typeof window !== "undefined") {
+  window.$ = window.jQuery = $;
+}
 
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 const CustomPeoplePicker = forwardRef(function CustomPeoplePicker(props, ref) {
   const {
-    /** Array of people – see data shape above */
     options = [],
-
-    /** Controlled value: string | string[] | null */
     value = null,
-
-    /** Called with the new value whenever selection changes */
     onChange,
-
-    /** Allow multiple selections */
     multiple = false,
-
-    /** Placeholder text */
     placeholder = "Search for a person…",
-
-    /** Minimum characters before search starts */
     minimumInputLength = 0,
-
-    /** Disable the control */
     disabled = false,
-
-    /** Keep the order the user selected items (multiple only) */
     preserveOrder = false,
-
-    /**
-     * Optional function that builds an image URL from a person object.
-     * Example: (person) => `https://my.cdn/photos/${person.id}.jpg`
-     * If the person already has an `image` property it is used first.
-     */
     getImageUrl,
-
-    /** Extra class on the underlying <select> */
     className = "",
-
-    /** Inline styles */
     style,
-
-    /** id attribute */
     id,
-
-    /** Called with (selectedPersonObject, select2Event) on select */
     onSelect,
   } = props;
 
   const selectRef = useRef(null);
   const $elRef = useRef(null);
   const initialized = useRef(false);
+  // Avoid running destroy/init twice under React StrictMode in development
+  const strictModeGuard = useRef(0);
 
-  // -------- Imperative handle (easy access from parent) --------
   useImperativeHandle(ref, () => ({
-    /** Current value (string | string[] | null) */
     getValue: () => $elRef.current?.val() ?? null,
-
-    /** Set value programmatically */
     setValue: (val) => {
       if ($elRef.current) applyValue($elRef.current, val, multiple, preserveOrder);
     },
-
-    /** Clear selection */
     clear: () => {
       if ($elRef.current) {
         $elRef.current.val(multiple ? [] : null).trigger("change");
       }
     },
-
-    /** Enable / disable */
     setDisabled: (state) => {
       if ($elRef.current) {
         $elRef.current.prop("disabled", !!state).trigger("change.select2");
       }
     },
-
-    /** Underlying jQuery Select2 instance (escape hatch) */
     getSelect2: () => $elRef.current,
   }));
 
@@ -107,20 +73,38 @@ const CustomPeoplePicker = forwardRef(function CustomPeoplePicker(props, ref) {
     const el = selectRef.current;
     if (!el) return;
 
+    // React 18 StrictMode runs effects twice in dev. Guard against double-init.
+    strictModeGuard.current += 1;
+    const runId = strictModeGuard.current;
+
     const $el = $(el);
     $elRef.current = $el;
 
-    // Destroy previous instance cleanly
-    if (initialized.current && $el.hasClass("select2-hidden-accessible")) {
-      $el.off(".cpp");
-      $el.select2("destroy");
+    // Safety: confirm select2 is available
+    if (typeof $.fn.select2 !== "function") {
+      console.error(
+        "[CustomPeoplePicker] $.fn.select2 is not a function.\n" +
+          "Make sure you installed: npm install jquery@3 select2\n" +
+          "and that the import at the top of CustomPeoplePicker.jsx runs."
+      );
+      return;
     }
 
-    // Build <option> elements
+    // Destroy previous instance if any
+    if (initialized.current && $el.hasClass("select2-hidden-accessible")) {
+      try {
+        $el.off(".cpp");
+        $el.select2("destroy");
+      } catch (_) {
+        /* ignore */
+      }
+    }
+
+    // Build options
     $el.empty();
     if (!multiple) $el.append("<option></option>");
 
-    options.forEach((person) => {
+    (options || []).forEach((person) => {
       if (!person || person.id == null) return;
 
       const imageUrl =
@@ -130,7 +114,7 @@ const CustomPeoplePicker = forwardRef(function CustomPeoplePicker(props, ref) {
 
       const label = person.name || person.email || String(person.id);
       const $opt = $("<option></option>")
-        .val(person.id)
+        .val(String(person.id))
         .text(label)
         .attr("data-email", person.email || "")
         .attr("data-image", imageUrl);
@@ -138,7 +122,6 @@ const CustomPeoplePicker = forwardRef(function CustomPeoplePicker(props, ref) {
       $el.append($opt);
     });
 
-    // Detect Bootstrap / other modal so dropdown appears above it
     const $modal = $el.closest(".modal");
 
     $el.select2({
@@ -146,16 +129,15 @@ const CustomPeoplePicker = forwardRef(function CustomPeoplePicker(props, ref) {
       allowClear: true,
       minimumInputLength,
       width: "100%",
-      disabled,
+      disabled: !!disabled,
       dropdownParent: $modal.length ? $modal : $(document.body),
-      templateResult: (item) => renderItem(item),
-      templateSelection: (item) => renderItem(item),
+      templateResult: renderItem,
+      templateSelection: renderItem,
       matcher: customMatcher,
     });
 
     initialized.current = true;
 
-    // Events
     $el.on("select2:select.cpp", (e) => {
       if (multiple && preserveOrder) {
         const $option = $(e.params.data.element);
@@ -164,7 +146,9 @@ const CustomPeoplePicker = forwardRef(function CustomPeoplePicker(props, ref) {
         $el.trigger("change");
       }
       if (typeof onSelect === "function") {
-        const person = options.find((p) => String(p.id) === String(e.params.data.id));
+        const person = (options || []).find(
+          (p) => String(p.id) === String(e.params.data.id)
+        );
         onSelect(person || e.params.data, e);
       }
     });
@@ -175,23 +159,29 @@ const CustomPeoplePicker = forwardRef(function CustomPeoplePicker(props, ref) {
       }
     });
 
-    // Apply current controlled value
     if (value != null) {
       applyValue($el, value, multiple, preserveOrder);
     }
 
     return () => {
+      // Only destroy if this is still the latest effect run
+      if (runId !== strictModeGuard.current) return;
       if ($el.hasClass("select2-hidden-accessible")) {
-        $el.off(".cpp");
-        $el.select2("destroy");
+        try {
+          $el.off(".cpp");
+          $el.select2("destroy");
+        } catch (_) {
+          /* ignore */
+        }
       }
       initialized.current = false;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [options, multiple, placeholder, minimumInputLength, preserveOrder, getImageUrl]);
 
-  // Keep controlled value in sync
+  // Sync controlled value
   useEffect(() => {
-    if (!$elRef.current || value === undefined) return;
+    if (!$elRef.current) return;
     const current = $elRef.current.val();
     const same = multiple
       ? JSON.stringify(current || []) === JSON.stringify(value || [])
@@ -201,9 +191,9 @@ const CustomPeoplePicker = forwardRef(function CustomPeoplePicker(props, ref) {
     }
   }, [value, multiple, preserveOrder]);
 
-  // Sync disabled state
+  // Sync disabled
   useEffect(() => {
-    if ($elRef.current) {
+    if ($elRef.current && typeof $.fn.select2 === "function") {
       $elRef.current.prop("disabled", !!disabled).trigger("change.select2");
     }
   }, [disabled]);
@@ -213,8 +203,8 @@ const CustomPeoplePicker = forwardRef(function CustomPeoplePicker(props, ref) {
       ref={selectRef}
       id={id}
       className={className}
-      multiple={multiple}
-      disabled={disabled}
+      multiple={multiple || undefined}
+      disabled={disabled || undefined}
       style={style}
       data-placeholder={placeholder}
     />
@@ -230,10 +220,10 @@ export default CustomPeoplePicker;
 function renderItem(item) {
   if (!item.id) return item.text;
 
-  const imageUrl = $(item.element).data("image");
+  const imageUrl = item.element ? $(item.element).data("image") : "";
   if (imageUrl) {
-    return $(`
-      <span style="display:flex;align-items:center;gap:8px;">
+    return $(
+      `<span style="display:flex;align-items:center;gap:8px;">
         <img
           src="${imageUrl}"
           alt=""
@@ -241,8 +231,8 @@ function renderItem(item) {
           onerror="this.style.display='none'"
         />
         <span>${item.text}</span>
-      </span>
-    `);
+      </span>`
+    );
   }
   return item.text;
 }
@@ -252,17 +242,21 @@ function customMatcher(params, data) {
 
   const term = params.term.toLowerCase();
   const text = (data.text || "").toLowerCase();
-  const email = ($(data.element).data("email") || "").toLowerCase();
+  const email = (data.element ? $(data.element).data("email") : "") || "";
   const id = (data.id || "").toLowerCase();
 
-  if (text.includes(term) || email.includes(term) || id.includes(term)) {
+  if (
+    text.includes(term) ||
+    String(email).toLowerCase().includes(term) ||
+    id.includes(term)
+  ) {
     return data;
   }
   return null;
 }
 
 function applyValue($el, value, multiple, preserveOrder) {
-  if (value == null) {
+  if (value == null || value === "") {
     $el.val(multiple ? [] : null).trigger("change");
     return;
   }
@@ -270,12 +264,13 @@ function applyValue($el, value, multiple, preserveOrder) {
   if (multiple && preserveOrder && Array.isArray(value)) {
     value.forEach((id) => {
       const $opt = $el.find(`option[value="${id}"]`);
-      $opt.detach();
-      $el.append($opt);
+      if ($opt.length) {
+        $opt.detach();
+        $el.append($opt);
+      }
     });
   }
 
-  // Small delay lets Select2 finish building options
   setTimeout(() => {
     $el.val(value).trigger("change");
   }, 0);
